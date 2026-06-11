@@ -1,8 +1,11 @@
 \\-----------------------------------------------------------------------------
 
 README: Replication Package for "Does Government-Assisted Relocation Help Households"
+
 Author: Rachel Young
+
 Last Updated: 06-10-2026
+
 Contact: rmyoung@umn.edu
 
 \\-----------------------------------------------------------------------------
@@ -19,7 +22,9 @@ Because the analysis uses proprietary address-level data that cannot be publicly
 
 
 \\-----------------------------------------------------------------------------
-\\ Quick Start (One-Click Run)
+
+Quick Start (One-Click Run)
+
 \\-----------------------------------------------------------------------------
 
 From the repository root, run:
@@ -46,7 +51,9 @@ hold.
 
 
 \\-----------------------------------------------------------------------------
-\\ Set Up
+
+Set Up
+
 \\-----------------------------------------------------------------------------
 
 Scripts provided are written in Stata and R. Note that you will need a Stata license to fully replicate the analysis. Throughout this ReadMe, when indicating paths to code and data, it is assumed that you’ll execute scripts from the repo root directory.
@@ -77,7 +84,9 @@ rlang, and fastLink, but none of these are actually used by the R scripts in
 this package, so they are no longer required.)
 
 \\-----------------------------------------------------------------------------
-\\ File Structure
+
+File Structure
+
 \\-----------------------------------------------------------------------------
 /run_all.R				One-click entry point (see Quick Start above)
 /cleandata 				Stores the data needed for the replication
@@ -88,7 +97,9 @@ this package, so they are no longer required.)
 
 
 \\-----------------------------------------------------------------------------
-\\ Data Documentation
+
+Data Documentation
+
 \\-----------------------------------------------------------------------------
 
 A detailed description of the data used in this analysis can be found in the Supplementary Information associated with the article. However, there are several datasets that cannot be made public. 
@@ -114,7 +125,9 @@ These raw datasets contain personally identifiable and sensitive information and
 
 
 \\-----------------------------------------------------------------------------
-\\ Replication Steps
+
+ Replication Steps
+
 \\-----------------------------------------------------------------------------
 
 There are five stages to our analysis:
@@ -141,7 +154,7 @@ of the final processed data. This allows users to run all analysis scripts
 and generate placeholder regression outputs and figures.
 
 
-\\-----------------------------------------------------------------------------
+\-----------------------------------------------------------------------------
 
 
 2. Main Analysis (Runs with Toy Data)
@@ -199,7 +212,7 @@ If you have access to the underlying confidential data plus NHGIS / lat-lon
 files, these checks can be reconstructed following the same pattern as
 09_robustness_checks.R.
 
-\\-----------------------------------------------------------------------------
+\-----------------------------------------------------------------------------
 
 
 3. Figure Creation
