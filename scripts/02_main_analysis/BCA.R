@@ -20,9 +20,8 @@ library(ggplot2)
 # -----------------------------
 
 # Project directories
-setwd("/Users/rachelyoung/Dropbox/Princeton/research/buyoutprogram")
-root_dir   <- "2026"
-out_dir    <- file.path(root_dir, "data/intermediate/bca_outputs")
+root_dir   <- ""
+out_dir    <- file.path(root_dir, "bca_outputs")
 fig_dir    <- file.path(root_dir, "figures", "bca")
 
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
