@@ -5,11 +5,13 @@
 # BCR-vs-recurrence diagnostic. See BCA.R's header for methodology/history notes.
 ############################################################
 library(data.table)
-ROOT <- "/Users/rachelyoung/Dropbox/Princeton/research/buyoutprogram/2026/bca_revisions"
-OUT <- file.path(ROOT, "full_bca_recurrence_outputs")
-FIG <- file.path(ROOT, "figures_full_recurrence")
+# Paths are relative to the repository root (run via run_all.R, or `Rscript
+# scripts/02_main_analysis/BCA_figures.R` from the repo root, after BCA.R).
+INPUT_DIR <- file.path("rawdata", "bca_inputs")
+OUT <- file.path("output", "bca")
+FIG <- file.path("figures", "bca")
 
-rb <- jsonlite::fromJSON(file.path(ROOT, "recurrence_benchmarks.json"))
+rb <- jsonlite::fromJSON(file.path(INPUT_DIR, "recurrence_benchmarks.json"))
 p_lower <- rb$lower_recurrence_nfip_zone_weighted_EXACT
 p_rl <- rb$repetitive_loss_benchmark
 p_upper <- rb$upper_recurrence_county_disaster_declaration

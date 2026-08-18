@@ -43,13 +43,15 @@
 ############################################################
 library(data.table)
 
-ROOT <- "/Users/rachelyoung/Dropbox/Princeton/research/buyoutprogram/2026/bca_revisions"
-OUT <- file.path(ROOT, "full_bca_recurrence_outputs")
-FIG <- file.path(ROOT, "figures_full_recurrence")
+# Paths are relative to the repository root (run via run_all.R, or `Rscript
+# scripts/02_main_analysis/BCA.R` from the repo root).
+INPUT_DIR <- file.path("rawdata", "bca_inputs")
+OUT <- file.path("output", "bca")
+FIG <- file.path("figures", "bca")
 if (!dir.exists(OUT)) dir.create(OUT, recursive = TRUE)
 if (!dir.exists(FIG)) dir.create(FIG, recursive = TRUE)
 
-rb <- jsonlite::fromJSON(file.path(ROOT, "recurrence_benchmarks.json"))
+rb <- jsonlite::fromJSON(file.path(INPUT_DIR, "recurrence_benchmarks.json"))
 cond_loss <- rb$conditional_bc_loss  # $45,917
 p_lower <- rb$lower_recurrence_nfip_zone_weighted_EXACT   # 0.0153
 p_rl    <- rb$repetitive_loss_benchmark                    # 0.20
