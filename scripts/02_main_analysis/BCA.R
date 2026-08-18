@@ -1,911 +1,255 @@
 ############################################################
-# Buyout Benefit-Cost Analysis with Monte Carlo Sensitivity
-# Purpose: Fiscal/programmatic BCA aligned with estimated effects,
-#          realistic program costs, administrative costs,
-#          per-property and aggregate estimates, and uncertainty analysis.
+# BENEFIT-COST ANALYSIS (BCA) -- official pipeline
 #
-# Author: Rachel Young
-# Date: 2026-05-11
+# AnnualBenefit_t = [RiskReductionEffect_s x Recurrence x ConditionalBuildingContentsLoss
+#                    + RiskReductionEffect_s x Recurrence x ConditionalDisasterAssistance (IA)
+#                    + AmenityOpenSpace] x RealizationProfile_t
+#
+# Benefits combine three components, all defined per treated property:
+#  1. Avoided flood-related building and contents damage: a recurrence-scaled conditional
+#     severity estimate (D-bar) derived from paid NFIP claims (N=494,010, buyout-ZIP/A-V-
+#     zone matched -- see ../bca_revisions/conditional_severity_reproduction.json for
+#     provenance). NFIP participation rate is NOT applied, since D-bar is already an
+#     unconditional-on-programmatic-payout severity estimate.
+#  2. Avoided FEMA Individual and Households Program (IHP) disaster assistance, scaled by
+#     BOTH recurrence and the risk-reduction effect -- IA only accrues in years a damaging
+#     flood actually occurs. Preferred value $4,811 (OpenFEMA, IHP-only) -- see note at the
+#     benefit_assumptions table below.
+#  3. A fixed open-space amenity co-benefit, not scaled by recurrence or the risk-reduction
+#     effect, since it accrues regardless of whether a flood occurs.
+# The conditional building-and-contents loss (D-bar) is Monte Carlo-varied, drawn from the
+# same empirical NFIP-claims distribution its preferred value comes from (p25/p75 of
+# N=494,010 paid claims), not held fixed -- unlike recurrence, which IS held fixed as a
+# named-benchmark sensitivity dimension (see below), D-bar has substantial empirical
+# variance (sd=$82,351) with no reason to treat it as a scenario choice rather than an
+# uncertain quantity.
+#
+# Parameters are split into cost_assumptions (true one-time program costs: acquisition,
+# relocation, demolition/site restoration, admin/transaction share, deadweight cost of
+# public funds) and benefit_assumptions (IA, open-space amenity, and the conditional
+# building-and-contents loss) -- the latter three are benefit-side inputs, not costs.
+#
+# Recurrence is a SENSITIVITY DIMENSION (3 named benchmarks -- lower/repetitive-loss/upper),
+# not a sampled distribution -- held fixed within each Monte Carlo run below.
+#
+# Reads ../bca_revisions/recurrence_benchmarks.json for the flood-hazard-side parameters
+# (D-bar preferred value, recurrence benchmarks); cost/IA/amenity preferred-low-high
+# assumptions are hardcoded in the benefit_assumptions/cost_assumptions tables below.
+#
+# History: superseded an earlier NFIP-claims x participation-rate specification (archived
+# at ../scripts/archive/BCA_original_NFIP_based_pre2026-08-18.R) and an intermediate
+# recurrence-only, no-IA/amenity parallel spec (archived at
+# ../bca_revisions/archive/recurrence_bca.R) during methodology revisions in August 2026.
 ############################################################
-
-# -----------------------------
-# 0. Packages
-# -----------------------------
-
 library(data.table)
-library(ggplot2)
 
-# -----------------------------
-# 1. User inputs
-# -----------------------------
+ROOT <- "/Users/rachelyoung/Dropbox/Princeton/research/buyoutprogram/2026/bca_revisions"
+OUT <- file.path(ROOT, "full_bca_recurrence_outputs")
+FIG <- file.path(ROOT, "figures_full_recurrence")
+if (!dir.exists(OUT)) dir.create(OUT, recursive = TRUE)
+if (!dir.exists(FIG)) dir.create(FIG, recursive = TRUE)
 
-# Project directories
-root_dir   <- ""
-out_dir    <- file.path(root_dir, "bca_outputs")
-fig_dir    <- file.path(root_dir, "figures", "bca")
+rb <- jsonlite::fromJSON(file.path(ROOT, "recurrence_benchmarks.json"))
+cond_loss <- rb$conditional_bc_loss  # $45,917
+p_lower <- rb$lower_recurrence_nfip_zone_weighted_EXACT   # 0.0153
+p_rl    <- rb$repetitive_loss_benchmark                    # 0.20
+p_upper <- rb$upper_recurrence_county_disaster_declaration  # 0.2328
 
-if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
-if (!dir.exists(fig_dir)) dir.create(fig_dir, recursive = TRUE)
+cat(sprintf("Conditional B+C loss: $%.0f\n", cond_loss))
+cat(sprintf("Recurrence benchmarks: lower=%.4f, RL=%.4f, upper=%.4f\n", p_lower, p_rl, p_upper))
 
-# Total number of buyout properties in the analysis/program universe.
-# Used only to scale per-property estimates into aggregate program totals.
 n_buyout_properties <- 44000
-
-# Monte Carlo settings
-set.seed(12345)
 nsim <- 50000
-
-# Discount rates for deterministic sensitivity
 real_discount_rates <- c(0.01, 0.02, 0.03, 0.05, 0.07)
 preferred_discount_rate <- 0.03
-
-# Analysis horizon after buyout.
 horizons <- c(10, 20, 30)
 preferred_horizon <- 30
 
-# -----------------------------
-# 2. Core BCA assumption table
-# -----------------------------
-
-# Notes:
-# - This is a fiscal/programmatic BCA, not a full welfare analysis.
-# - Costs are one-time program costs per treated buyout property.
-# - Benefits are annual expected avoided public costs per treated buyout property.
-# - NFIP benefits are adjusted for incomplete insurance take-up.
-# - Uninsured/private damages and displacement welfare costs are intentionally excluded.
-
-assumptions <- data.table(
-  parameter = c(
-    "property_acquisition_cost",
-    "relocation_assistance",
-    "demolition_site_restoration",
-    "admin_transaction_cost_share",
-    "annual_expected_nfip_claims",
-    "annual_expected_disaster_assistance",
-    "nfip_participation_rate",
-    "amenity_open_space_annual",
-    "deadweight_cost_public_funds"
-  ),
-  preferred = c(
-    87160,  # observed median of positive acquisition costs, excluding zeros
-    0,
-    35000,
-    0.15,
-    16518, # annual expected NFIP claims if insured; verify this is annualized
-    9623,  # annual expected FEMA IA / other public disaster assistance; verify annualized
-    0.30,
-    250,
-    0.00
-  ),
-  low = c(
-    7776,
-    0,
-    15000,
-    0.10,
-    1474,
-    0,
-    0.15,
-    0,
-    0.00
-  ),
-  high = c(
-    325583,
-    5000,
-    80000,
-    0.25,
-    72699,
-    18595,
-    0.60,
-    2000,
-    0.30
-  ),
-  distribution = rep("beta_scaled", 9),
-  notes = c(
-    "Acquisition-only cost. Preferred value is observed median of positive acquisition costs, omitting zeros. Distribution is right-skewed. Prefer empirical resampling from observed positive acquisition costs if available.",
-    "Relocation assistance if paid as a program expenditure. Set conservatively to zero in the baseline and vary in sensitivity analysis.",
-    "Production costs: demolition, asbestos/environmental remediation, grading, and site restoration. Keep separate from administrative/transaction costs.",
-    "Administrative and transaction costs: grant writing, planning, public engagement, appraisals, BCA preparation, environmental/historic review, reporting, intergovernmental coordination, legal/title/closing, and project management. Baseline 15%; sensitivity 10-25%.",
-    "Annual expected NFIP claims per property conditional on being insured. If this is a claim/event average rather than an annual expected value, it must be annualized before use.",
-    "Annual expected FEMA IA / other public disaster assistance per property. If this is conditional on disaster receipt rather than annual expected value, it must be annualized before use.",
-    "Share of relevant properties expected to have NFIP coverage; scales expected NFIP claim benefits to account for incomplete insurance take-up.",
-    "Optional open-space amenity co-benefit; include conservatively or as sensitivity only.",
-    "Optional marginal cost of public funds. Baseline zero; sensitivity only."
-  )
+# True one-time program costs.
+cost_assumptions <- data.table(
+  parameter = c("property_acquisition_cost","relocation_assistance","demolition_site_restoration",
+                "admin_transaction_cost_share","deadweight_cost_public_funds"),
+  preferred = c(87160, 0, 35000, 0.15, 0.00),
+  low       = c(7776,  0, 15000, 0.10, 0.00),
+  high      = c(325583,5000,80000,0.25,0.30)
 )
 
-fwrite(assumptions, file.path(out_dir, "bca_assumptions.csv"))
+# Benefit-side assumptions (annual_expected_nfip_claims and nfip_participation_rate omitted
+# -- replaced by the recurrence x conditional_bc_loss term).
+#
+# IA: annual_expected_disaster_assistance preferred/low/high are the mean/min/max of 21
+# annual per-property IHP-only payout values from OpenFEMA (user-supplied, 2026-08-17) --
+# mean $4,811.41, range $2,130.75-$9,298.51 -- resolving both the earlier scope flag
+# (IHP-only, not IHP+HA+ONA) and the low/high bounds (previously a proportional guess off
+# the old $9,623/$18,595 figures inherited from ../scripts/BCA.R; the low bound in
+# particular is no longer $0, since no year in this 21-value panel is anywhere near zero).
+# Preferred/low/high are TREATED BELOW as conditional on a damaging flood occurring
+# (recurrence is applied to this term in run_bcaR, same as conditional_bc_loss), consistent
+# with each value being a per-year OpenFEMA figure rather than an already-frequency-
+# weighted one.
+#
+# conditional_bc_loss: preferred = $45,917 (mean of N=494,010 paid NFIP claims, buyout-ZIP/
+# A-V-zone matched -- see conditional_severity_reproduction.json). low/high = the empirical
+# p25/p75 of that same claims distribution ($4,910.99/$55,628.98, from
+# conditional_severity_reproduction.json), user-selected 2026-08-18 over the alternative of
+# reusing the +/-25% bound from the one-at-a-time sensitivity analysis. Now drawn per
+# Monte Carlo simulation via draw_cost_parameter(), same as every other benefit_assumptions
+# row -- previously held fixed at $45,917 in every simulation.
+benefit_assumptions <- data.table(
+  parameter = c("annual_expected_disaster_assistance","amenity_open_space_annual","conditional_bc_loss"),
+  preferred = c(4811, 250, cond_loss),
+  low       = c(2131, 0,   4911),
+  high      = c(9299, 2000,55629)
+)
 
-# -----------------------------
-# 3. Helper functions
-# -----------------------------
-
-# Present value of annual flow over horizon with real discount rate r.
-pv_phased_benefits <- function(annual_benefit, r, horizon, realization_profile) {
+all_assumptions <- rbindlist(list(cost_assumptions, benefit_assumptions))
+realization_profile <- c(0.05,0.30,0.55,0.75,0.90,1.00,1.00,1.00,1.00,1.00)
+pv_phased_benefits <- function(annual_benefit, r, horizon, profile) {
   years <- seq_len(horizon)
-  profile <- ifelse(
-    years <= length(realization_profile),
-    realization_profile[years],
-    tail(realization_profile, 1)
-  )
-  discounted_benefits <- annual_benefit * profile / ((1 + r) ^ years)
-  sum(discounted_benefits)
+  p <- ifelse(years <= length(profile), profile[years], tail(profile,1))
+  sum(annual_benefit * p / (1+r)^years)
 }
-
-# Draw from approximate distributions using low/preferred/high.
-# This keeps assumptions transparent and easy to explain.
 draw_beta_scaled <- function(n, low, mode, high, shape = 8) {
-  # Simple beta-PERT-like draw bounded by low/high.
-  # Larger shape means tighter around preferred value.
   if (high <= low) return(rep(low, n))
-  m <- (mode - low) / (high - low)
-  m <- min(max(m, 0.001), 0.999)
-  alpha <- 1 + shape * m
-  beta  <- 1 + shape * (1 - m)
+  m <- min(max((mode - low) / (high - low), 0.001), 0.999)
+  alpha <- 1 + shape * m; beta <- 1 + shape * (1 - m)
   low + (high - low) * rbeta(n, alpha, beta)
 }
-
-draw_parameter <- function(row, n) {
-  dist <- row$distribution[[1]]
-  low  <- row$low[[1]]
-  pref <- row$preferred[[1]]
-  high <- row$high[[1]]
-  
-  if (dist == "beta_scaled") {
-    return(draw_beta_scaled(n, low, pref, high))
-  }
-  stop(paste("Unknown distribution:", dist))
-}
-
-make_draws <- function(assumptions, nsim) {
-  draws <- data.table(sim = 1:nsim)
-  for (p in assumptions$parameter) {
-    row <- assumptions[parameter == p]
-    draws[, (p) := draw_parameter(row, nsim)]
-  }
-  draws
-}
-
-# Add aggregate totals to a result table with per-property estimates.
-add_aggregate_totals <- function(dt, n_properties) {
-  out <- copy(dt)
-  out[, `:=`(
-    n_buyout_properties = n_properties,
-    aggregate_direct_program_cost = direct_program_cost * n_properties,
-    aggregate_admin_transaction_cost = admin_transaction_cost * n_properties,
-    aggregate_total_cost = total_cost * n_properties,
-    aggregate_pv_benefits = pv_benefits * n_properties,
-    aggregate_net_benefit = net_benefit * n_properties
-  )]
-  out
-}
-
-# -----------------------------
-# 4. Scenario definitions
-# -----------------------------
+draw_cost_parameter <- function(row, n) draw_beta_scaled(n, row$low[[1]], row$preferred[[1]], row$high[[1]])
 
 bca_scenarios <- data.table(
-  scenario = c(
-    "Scenario 1: Full relocation",
-    "Scenario 2: Estimated move effect",
-    "Scenario 3: Estimated SFHA exit effect"
-  ),
-  scenario_short = c(
-    "Full relocation",
-    "Move effect",
-    "SFHA exit effect"
-  ),
-  risk_reduction_effect = c(
-    1.00,  # upper-bound benchmark
-    0.77,  # based on estimated cumulative move effect among treated movers controling for flood group
-    0.65   # based on estimated not-living-in-SFHA effect
-  ),
-  risk_reduction_effect_sd = c(
-    0.03,
-    0.0088,
-    0.025
-  )
+  scenario_short = c("Full relocation","Move effect","SFHA exit effect"),
+  risk_reduction_effect = c(1.00, 0.77, 0.65),
+  risk_reduction_effect_sd = c(0.03, 0.0088, 0.025)
 )
 
-benefit_realization_profile <- c(
-  0.05, # year 1
-  0.30, # year 2
-  0.55, # year 3
-  0.75, # year 4
-  0.90, # year 5
-  1.00, # year 6
-  1.00, # year 7
-  1.00, # year 8
-  1.00, # year 9
-  1.00  # year 10+
-)
+run_bcaR <- function(cost_params, rre, recurrence, r=0.03, h=30) {
+  direct_cost <- cost_params$property_acquisition_cost + cost_params$relocation_assistance + cost_params$demolition_site_restoration
+  admin_cost <- cost_params$admin_transaction_cost_share * direct_cost
+  total_cost <- (direct_cost + admin_cost) * (1 + cost_params$deadweight_cost_public_funds)
 
-# -----------------------------
-# 5. BCA engine
-# -----------------------------
+  annual_expected_damage <- recurrence * cost_params$conditional_bc_loss
+  annual_avoided_flood_damage <- rre * annual_expected_damage          # replaces NFIP term
+  # IA is conditional on a damaging flood occurring, exactly like the flood-damage term --
+  # apply recurrence here too, not just RRE, or benefits are overstated (IA would accrue
+  # every year regardless of whether a flood happened that year).
+  annual_avoided_disaster_assistance <- rre * recurrence * cost_params$annual_expected_disaster_assistance
+  annual_amenity <- cost_params$amenity_open_space_annual              # unchanged, not RRE-scaled, not recurrence-scaled
 
-run_bca_once <- function(params,
-                         risk_reduction_effect,
-                         discount_rate = 0.03,
-                         horizon = 30) {
-  
-  # One-time program costs per treated buyout property.
-  direct_program_cost <- params$property_acquisition_cost +
-    params$relocation_assistance +
-    params$demolition_site_restoration
-  
-  admin_transaction_cost <- params$admin_transaction_cost_share * direct_program_cost
-  
-  resource_cost_before_mcpf <- direct_program_cost +
-    admin_transaction_cost
-  
-  total_cost <- resource_cost_before_mcpf *
-    (1 + params$deadweight_cost_public_funds)
-  
-  # Annual expected avoided public costs per treated buyout property.
-  # NFIP savings are scaled by insurance participation because uninsured properties
-  # do not generate NFIP claim payments.
-  annual_avoided_nfip_claims <- risk_reduction_effect *
-    params$nfip_participation_rate *
-    params$annual_expected_nfip_claims
-  
-  annual_avoided_disaster_assistance <- risk_reduction_effect *
-    params$annual_expected_disaster_assistance
-  
-  annual_public_avoided_cost <- annual_avoided_nfip_claims +
-    annual_avoided_disaster_assistance
-  
-  annual_amenity <- params$amenity_open_space_annual
-  
-  annual_benefit <- annual_public_avoided_cost +
-    annual_amenity
-  
-  pv_benefits <- pv_phased_benefits(
-    annual_benefit = annual_benefit,
-    r = discount_rate,
-    horizon = horizon,
-    realization_profile = benefit_realization_profile
-  )
-  
-  net_benefit <- pv_benefits - total_cost
-  benefit_cost_ratio <- pv_benefits / total_cost
-  
-  data.table(
-    discount_rate = discount_rate,
-    horizon = horizon,
-    risk_reduction_effect = risk_reduction_effect,
-    direct_program_cost = direct_program_cost,
-    admin_transaction_cost = admin_transaction_cost,
-    total_cost = total_cost,
-    annual_avoided_nfip_claims = annual_avoided_nfip_claims,
-    annual_avoided_disaster_assistance = annual_avoided_disaster_assistance,
-    annual_public_avoided_cost = annual_public_avoided_cost,
-    annual_amenity = annual_amenity,
-    annual_benefit = annual_benefit,
-    pv_benefits = pv_benefits,
-    net_benefit = net_benefit,
-    benefit_cost_ratio = benefit_cost_ratio
-  )
+  annual_benefit <- annual_avoided_flood_damage + annual_avoided_disaster_assistance + annual_amenity
+  pv <- pv_phased_benefits(annual_benefit, r, h, realization_profile)
+
+  data.table(discount_rate=r, horizon=h, risk_reduction_effect=rre, recurrence=recurrence,
+             cond_loss=cost_params$conditional_bc_loss,
+             annual_expected_damage=annual_expected_damage,
+             annual_avoided_flood_damage=annual_avoided_flood_damage,
+             annual_avoided_disaster_assistance=annual_avoided_disaster_assistance,
+             annual_amenity=annual_amenity,
+             annual_benefit=annual_benefit,
+             total_cost=total_cost, pv_benefits=pv, net_benefit=pv-total_cost, benefit_cost_ratio=pv/total_cost)
 }
+preferred_cost_params <- as.list(setNames(all_assumptions$preferred, all_assumptions$parameter))
 
-preferred_params <- as.list(setNames(assumptions$preferred, assumptions$parameter))
+############################################################
+# 1. Deterministic across full recurrence grid x scenarios x horizons (r=3% for grid;
+#    full discount-rate grid also computed at preferred recurrence points for the
+#    discount/horizon sensitivity figure)
+############################################################
+# Extended beyond p_upper so the diagnostic figure can show the SFHA-exit break-even point
+# (23.9%, from breakeven_recurrence.csv), which exceeds the upper recurrence benchmark.
+recurrence_grid_max <- 0.26
+recurrence_grid <- sort(unique(c(seq(p_lower, recurrence_grid_max, length.out = 30), p_lower, p_rl, p_upper)))
 
-# -----------------------------
-# 6. Deterministic BCA table
-# -----------------------------
-
-deterministic_results <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
+det_grid <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
   scen <- bca_scenarios[s]
-  
-  rbindlist(lapply(real_discount_rates, function(r) {
-    rbindlist(lapply(horizons, function(h) {
-      out <- run_bca_once(
-        params = preferred_params,
-        risk_reduction_effect = scen$risk_reduction_effect,
-        discount_rate = r,
-        horizon = h
-      )
-      out[, `:=`(
-        scenario = scen$scenario,
-        scenario_short = scen$scenario_short
-      )]
-      out
+  rbindlist(lapply(recurrence_grid, function(p) {
+    out <- run_bcaR(preferred_cost_params, scen$risk_reduction_effect, p, preferred_discount_rate, preferred_horizon)
+    out[, scenario_short := scen$scenario_short]
+    out
+  }))
+}))
+fwrite(det_grid, file.path(OUT, "deterministic_recurrence_grid.csv"))
+
+# break-even recurrence per scenario (closed form).
+# IA now scales with recurrence too (see run_bcaR), so it combines additively with
+# cond_loss inside the recurrence-scaled bracket:
+# total_cost = PVfactor(r,h) x [rre*p*(cond_loss+IA) + amenity]
+# => p* = (total_cost/PVfactor - amenity) / (rre*(cond_loss+IA))
+pv_factor_at <- function(r, h) {
+  years <- seq_len(h)
+  p <- ifelse(years <= length(realization_profile), realization_profile[years], tail(realization_profile,1))
+  sum(p/(1+r)^years)
+}
+pvf <- pv_factor_at(preferred_discount_rate, preferred_horizon)
+base_cost <- (87160+35000)*1.15
+ia_pref <- preferred_cost_params$annual_expected_disaster_assistance
+amenity_pref <- preferred_cost_params$amenity_open_space_annual
+cond_loss_pref <- preferred_cost_params$conditional_bc_loss
+breakeven <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
+  scen <- bca_scenarios[s]
+  rre <- scen$risk_reduction_effect
+  pstar <- (base_cost/pvf - amenity_pref) / (rre * (cond_loss_pref + ia_pref))
+  data.table(scenario_short=scen$scenario_short, risk_reduction_effect=rre, breakeven_recurrence=pstar)
+}))
+fwrite(breakeven, file.path(OUT, "breakeven_recurrence.csv"))
+cat("\n=== BREAK-EVEN RECURRENCE (p* such that BCR=1), h=30, r=3%, IA+amenity included ===\n")
+print(breakeven)
+
+# discount/horizon sensitivity at the three named benchmarks
+det_benchmarks_full <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
+  scen <- bca_scenarios[s]
+  rbindlist(lapply(c(p_lower, p_rl, p_upper), function(p) {
+    rbindlist(lapply(real_discount_rates, function(r) {
+      rbindlist(lapply(horizons, function(h) {
+        out <- run_bcaR(preferred_cost_params, scen$risk_reduction_effect, p, r, h)
+        out[, scenario_short := scen$scenario_short]
+        out
+      }))
     }))
   }))
 }))
+fwrite(det_benchmarks_full, file.path(OUT, "deterministic_benchmarks_full_grid.csv"))
 
-deterministic_results <- add_aggregate_totals(
-  deterministic_results,
-  n_buyout_properties
-)
+cat("\n=== DETERMINISTIC at 3 named benchmarks (h=30, r=3%) ===\n")
+print(det_benchmarks_full[horizon==30 & discount_rate==0.03, .(scenario_short, recurrence=round(recurrence,4), annual_benefit=round(annual_benefit), net_benefit=round(net_benefit), bcr=round(benefit_cost_ratio,3))])
 
-fwrite(deterministic_results, file.path(out_dir, "deterministic_bca_results.csv"))
-
-# -----------------------------
-# 7. Monte Carlo BCA
-# -----------------------------
-
-mc_results <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
-  scen <- bca_scenarios[s]
-  
-  param_draws <- make_draws(assumptions, nsim)
-  
-  param_draws[, risk_reduction_effect := rnorm(
-    .N,
-    mean = scen$risk_reduction_effect,
-    sd = scen$risk_reduction_effect_sd
-  )]
-  
-  param_draws[, risk_reduction_effect := pmin(pmax(risk_reduction_effect, 0), 1)]
-  
-  param_draws[, discount_rate := draw_beta_scaled(.N, 0.01, preferred_discount_rate, 0.07)]
-  param_draws[, horizon := sample(horizons, .N, replace = TRUE, prob = c(0.2, 0.3, 0.5))]
-  
-  out <- param_draws[, {
-    params <- as.list(.SD)
-    run_bca_once(
-      params = params,
-      risk_reduction_effect = risk_reduction_effect,
-      discount_rate = discount_rate,
-      horizon = horizon
-    )
-  }, by = sim, .SDcols = assumptions$parameter]
-  
-  out[, `:=`(
-    scenario = scen$scenario,
-    scenario_short = scen$scenario_short
-  )]
-  
-  out
-}))
-
-mc_results <- add_aggregate_totals(
-  mc_results,
-  n_buyout_properties
-)
-
-fwrite(mc_results, file.path(out_dir, "monte_carlo_bca_results.csv"))
-
-mc_summary <- mc_results[, .(
-  n = .N,
-  
-  # Per-property values
-  mean_pv_benefits = mean(pv_benefits, na.rm = TRUE),
-  median_pv_benefits = median(pv_benefits, na.rm = TRUE),
-  p05_pv_benefits = quantile(pv_benefits, 0.05, na.rm = TRUE),
-  p95_pv_benefits = quantile(pv_benefits, 0.95, na.rm = TRUE),
-  
-  mean_total_cost = mean(total_cost, na.rm = TRUE),
-  median_total_cost = median(total_cost, na.rm = TRUE),
-  p05_total_cost = quantile(total_cost, 0.05, na.rm = TRUE),
-  p95_total_cost = quantile(total_cost, 0.95, na.rm = TRUE),
-  
-  mean_net_benefit = mean(net_benefit, na.rm = TRUE),
-  median_net_benefit = median(net_benefit, na.rm = TRUE),
-  p05_net_benefit = quantile(net_benefit, 0.05, na.rm = TRUE),
-  p95_net_benefit = quantile(net_benefit, 0.95, na.rm = TRUE),
-  
-  mean_bcr = mean(benefit_cost_ratio, na.rm = TRUE),
-  median_bcr = median(benefit_cost_ratio, na.rm = TRUE),
-  p05_bcr = quantile(benefit_cost_ratio, 0.05, na.rm = TRUE),
-  p95_bcr = quantile(benefit_cost_ratio, 0.95, na.rm = TRUE),
-  
-  pr_net_benefit_positive = mean(net_benefit > 0, na.rm = TRUE),
-  pr_bcr_above_one = mean(benefit_cost_ratio > 1, na.rm = TRUE),
-  
-  # Aggregate values across 44,000 buyouts
-  n_buyout_properties = first(n_buyout_properties),
-  mean_aggregate_pv_benefits = mean(aggregate_pv_benefits, na.rm = TRUE),
-  median_aggregate_pv_benefits = median(aggregate_pv_benefits, na.rm = TRUE),
-  p05_aggregate_pv_benefits = quantile(aggregate_pv_benefits, 0.05, na.rm = TRUE),
-  p95_aggregate_pv_benefits = quantile(aggregate_pv_benefits, 0.95, na.rm = TRUE),
-  
-  mean_aggregate_total_cost = mean(aggregate_total_cost, na.rm = TRUE),
-  median_aggregate_total_cost = median(aggregate_total_cost, na.rm = TRUE),
-  p05_aggregate_total_cost = quantile(aggregate_total_cost, 0.05, na.rm = TRUE),
-  p95_aggregate_total_cost = quantile(aggregate_total_cost, 0.95, na.rm = TRUE),
-  
-  mean_aggregate_net_benefit = mean(aggregate_net_benefit, na.rm = TRUE),
-  median_aggregate_net_benefit = median(aggregate_net_benefit, na.rm = TRUE),
-  p05_aggregate_net_benefit = quantile(aggregate_net_benefit, 0.05, na.rm = TRUE),
-  p95_aggregate_net_benefit = quantile(aggregate_net_benefit, 0.95, na.rm = TRUE)
-), by = .(scenario, scenario_short)]
-
-fwrite(mc_summary, file.path(out_dir, "monte_carlo_bca_summary.csv"))
-
-# -----------------------------
-# 8. Sensitivity / tornado-style analysis by scenario
-# -----------------------------
-
-oat_sensitivity <- rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
-  scen <- bca_scenarios[s]
-  
-  rbindlist(lapply(assumptions$parameter, function(p) {
-    low_params <- preferred_params
-    high_params <- preferred_params
-    
-    low_params[[p]] <- assumptions[parameter == p, low]
-    high_params[[p]] <- assumptions[parameter == p, high]
-    
-    low_res <- run_bca_once(
-      params = low_params,
-      risk_reduction_effect = scen$risk_reduction_effect,
-      discount_rate = preferred_discount_rate,
-      horizon = preferred_horizon
-    )
-    
-    high_res <- run_bca_once(
-      params = high_params,
-      risk_reduction_effect = scen$risk_reduction_effect,
-      discount_rate = preferred_discount_rate,
-      horizon = preferred_horizon
-    )
-    
-    low_res <- add_aggregate_totals(low_res, n_buyout_properties)
-    high_res <- add_aggregate_totals(high_res, n_buyout_properties)
-    
-    data.table(
-      scenario = scen$scenario,
-      scenario_short = scen$scenario_short,
-      parameter = p,
-      low_net_benefit = low_res$net_benefit,
-      high_net_benefit = high_res$net_benefit,
-      low_aggregate_net_benefit = low_res$aggregate_net_benefit,
-      high_aggregate_net_benefit = high_res$aggregate_net_benefit,
-      low_bcr = low_res$benefit_cost_ratio,
-      high_bcr = high_res$benefit_cost_ratio,
-      range_net_benefit = abs(high_res$net_benefit - low_res$net_benefit),
-      range_aggregate_net_benefit = abs(high_res$aggregate_net_benefit - low_res$aggregate_net_benefit)
-    )
+############################################################
+# 2. Monte Carlo WITHIN each of the 3 named recurrence scenarios (recurrence held fixed
+#    per scenario -- a sensitivity dimension, not sampled; cost + IA + amenity +
+#    conditional_bc_loss + treatment-effect uncertainty propagated)
+############################################################
+set.seed(12345)
+param_names <- all_assumptions$parameter
+run_mc_at_recurrence <- function(p, label) {
+  rbindlist(lapply(seq_len(nrow(bca_scenarios)), function(s) {
+    scen <- bca_scenarios[s]
+    draws <- data.table(sim = 1:nsim)
+    for (cp in param_names) draws[, (cp) := draw_cost_parameter(all_assumptions[parameter == cp], nsim)]
+    draws[, risk_reduction_effect := rnorm(.N, mean = scen$risk_reduction_effect, sd = scen$risk_reduction_effect_sd)]
+    draws[, risk_reduction_effect := pmin(pmax(risk_reduction_effect, 0), 1)]
+    draws[, discount_rate := draw_beta_scaled(.N, 0.01, preferred_discount_rate, 0.07)]
+    draws[, horizon := sample(horizons, .N, replace = TRUE, prob = c(0.2, 0.3, 0.5))]
+    out <- draws[, {
+      cost_params <- as.list(.SD[, ..param_names])
+      run_bcaR(cost_params, risk_reduction_effect, p, discount_rate, horizon)
+    }, by = sim, .SDcols = c(param_names, "risk_reduction_effect","discount_rate","horizon")]
+    out[, `:=`(scenario_short = scen$scenario_short, recurrence_label = label)]
+    out
   }))
-}))
+}
+mc_lower <- run_mc_at_recurrence(p_lower, "Lower (1.53%)")
+mc_rl    <- run_mc_at_recurrence(p_rl, "Repetitive-loss (20%)")
+mc_upper <- run_mc_at_recurrence(p_upper, "Upper (23.28%)")
+mc_all <- rbindlist(list(mc_lower, mc_rl, mc_upper))
+fwrite(mc_all, file.path(OUT, "monte_carlo_by_recurrence_benchmark.csv"))
 
-oat_sensitivity <- oat_sensitivity[
-  order(scenario_short, -range_net_benefit)
-]
-
-fwrite(oat_sensitivity, file.path(out_dir, "one_at_a_time_sensitivity_by_scenario.csv"))
-
-# -----------------------------
-# 9. Paper/SI summary tables
-# -----------------------------
-
-# Scenario-specific paper-ready summary.
-paper_table <- mc_summary[, .(
-  scenario,
-  scenario_short,
-  n_buyout_properties,
-  preferred_discount_rate = preferred_discount_rate,
-  preferred_horizon = preferred_horizon,
-  median_pv_benefits_per_property = median_pv_benefits,
-  median_total_cost_per_property = median_total_cost,
-  median_net_benefit_per_property = median_net_benefit,
-  median_bcr = median_bcr,
-  pr_net_benefit_positive = pr_net_benefit_positive,
-  pr_bcr_above_one = pr_bcr_above_one,
-  median_aggregate_pv_benefits = median_aggregate_pv_benefits,
-  median_aggregate_total_cost = median_aggregate_total_cost,
-  median_aggregate_net_benefit = median_aggregate_net_benefit
-)]
-
-fwrite(paper_table, file.path(out_dir, "paper_ready_bca_summary.csv"))
-
+mc_summary <- mc_all[, .(
+  median_net_benefit=median(net_benefit), p05_net_benefit=quantile(net_benefit,0.05), p95_net_benefit=quantile(net_benefit,0.95),
+  median_bcr=median(benefit_cost_ratio), p05_bcr=quantile(benefit_cost_ratio,0.05), p95_bcr=quantile(benefit_cost_ratio,0.95),
+  pr_bcr_above_one=mean(benefit_cost_ratio>1)
+), by=.(recurrence_label, scenario_short)]
+fwrite(mc_summary, file.path(OUT, "monte_carlo_summary_by_recurrence_benchmark.csv"))
+cat("\n=== MC SUMMARY by recurrence benchmark x scenario ===\n")
 print(mc_summary)
-print(paper_table)
 
-# -----------------------------
-# 10. Figures
-# -----------------------------
-
-# Tornado plot: per-property net benefits, base R style.
-plot_sens <- copy(oat_sensitivity)
-
-param_order <- plot_sens[, .(
-  avg_range = mean(range_net_benefit, na.rm = TRUE)
-), by = parameter][order(-avg_range), parameter]
-
-plot_sens[, parameter_label := parameter]
-plot_sens[, parameter_label := gsub("_", " ", parameter_label)]
-plot_sens[, parameter_label := tools::toTitleCase(parameter_label)]
-plot_sens[, parameter_label := factor(parameter_label, levels = tools::toTitleCase(gsub("_", " ", param_order)))]
-plot_sens[, min_nb := pmin(low_net_benefit, high_net_benefit)]
-plot_sens[, max_nb := pmax(low_net_benefit, high_net_benefit)]
-
-preferred_lines <- deterministic_results[
-  discount_rate == preferred_discount_rate &
-    horizon == preferred_horizon,
-  .(scenario_short, preferred_net_benefit = net_benefit)
-]
-
-plot_sens <- merge(
-  plot_sens,
-  preferred_lines,
-  by = "scenario_short",
-  all.x = TRUE
-)
-
-scenario_cols <- c(
-  "Full relocation" = "#0072B2",
-  "Move effect" = "forestgreen",
-  "SFHA exit effect" = "goldenrod2"
-)
-
-pdf(
-  file = file.path(fig_dir, "bca_tornado_net_benefits_by_scenario.pdf"),
-  width = 11,
-  height = 7,
-  useDingbats = FALSE
-)
-
-par(
-  mfrow = c(1, 3),
-  mar = c(5, 9, 3, 1),
-  las = 1,
-  bty = "n"
-)
-
-for (s in c("Full relocation", "Move effect", "SFHA exit effect")) {
-  dt_s <- plot_sens[scenario_short == s]
-  col_s <- scenario_cols[s]
-  dt_s <- dt_s[order(parameter_label)]
-  dt_s[, y := seq_len(.N)]
-  
-  xlim_s <- range(c(dt_s$min_nb, dt_s$max_nb, dt_s$preferred_net_benefit, 0), na.rm = TRUE)
-  xpad <- diff(xlim_s) * 0.08
-  xlim_s <- c(xlim_s[1] - xpad, xlim_s[2] + xpad)
-  
-  plot(
-    NA,
-    xlim = xlim_s,
-    ylim = c(0.5, nrow(dt_s) + 0.5),
-    yaxt = "n",
-    xlab = "Net benefit per property",
-    ylab = "",
-    main = s,
-    cex.lab = 1.05,
-    cex.main = 1.05,
-    cex.axis = 0.9,
-    xaxt = "n"
-  )
-  
-  axis(
-    side = 1,
-    at = pretty(xlim_s),
-    labels = format(pretty(xlim_s), big.mark = ",", scientific = FALSE, trim = TRUE),
-    cex.axis = 0.85
-  )
-  
-  axis(
-    side = 2,
-    at = dt_s$y,
-    labels = as.character(dt_s$parameter_label),
-    tick = FALSE,
-    cex.axis = 0.8
-  )
-  
-  abline(v = 0, lty = 3, lwd = 1)
-  abline(v = unique(dt_s$preferred_net_benefit), lty = 2, lwd = 1.5)
-  
-  for (i in seq_len(nrow(dt_s))) {
-    row <- dt_s[i]
-    segments(
-      x0 = row$min_nb,
-      y0 = row$y,
-      x1 = row$max_nb,
-      y1 = row$y,
-      lwd = 3,
-      col = col_s
-    )
-    points(row$min_nb, row$y, pch = 16, cex = 0.7, col = col_s)
-    points(row$max_nb, row$y, pch = 16, cex = 0.7, col = col_s)
-  }
-}
-
-dev.off()
-
-# Discount-rate and horizon sensitivity, base R style.
-det_plot_dt <- copy(deterministic_results)
-det_plot_dt[, horizon := factor(horizon, levels = horizons)]
-
-pdf(
-  file = file.path(fig_dir, "bca_discount_horizon_sensitivity.pdf"),
-  width = 11,
-  height = 4.5,
-  useDingbats = FALSE
-)
-
-par(
-  mfrow = c(1, 3),
-  mar = c(5, 5, 3, 1),
-  las = 1,
-  bty = "n"
-)
-
-line_types <- c("10" = 1, "20" = 2, "30" = 3)
-point_types <- c("10" = 16, "20" = 17, "30" = 15)
-
-for (s in c("Full relocation", "Move effect", "SFHA exit effect")) {
-  dt_s <- det_plot_dt[scenario_short == s]
-  col_s <- scenario_cols[s]
-  
-  ylim_s <- range(c(dt_s$benefit_cost_ratio, 1), na.rm = TRUE)
-  ypad <- diff(ylim_s) * 0.12
-  ylim_s <- c(max(0, ylim_s[1] - ypad), ylim_s[2] + ypad)
-  
-  plot(
-    NA,
-    xlim = range(real_discount_rates),
-    ylim = ylim_s,
-    xlab = "Real discount rate",
-    ylab = "Benefit-cost ratio",
-    main = s,
-    cex.lab = 1.05,
-    cex.main = 1.05,
-    cex.axis = 0.95,
-    xaxt = "n"
-  )
-  
-  axis(
-    side = 1,
-    at = real_discount_rates,
-    labels = paste0(real_discount_rates * 100, "%"),
-    cex.axis = 0.9
-  )
-  
-  abline(h = 1, lty = 2, lwd = 1.5)
-  
-  for (h in as.character(horizons)) {
-    dt_h <- dt_s[as.character(horizon) == h][order(discount_rate)]
-    lines(
-      dt_h$discount_rate,
-      dt_h$benefit_cost_ratio,
-      lty = line_types[h],
-      lwd = 2,
-      col = col_s
-    )
-    points(
-      dt_h$discount_rate,
-      dt_h$benefit_cost_ratio,
-      pch = point_types[h],
-      cex = 1,
-      col = col_s
-    )
-  }
-  
-  legend(
-    "topright",
-    legend = paste0(horizons, " years"),
-    lty = line_types[as.character(horizons)],
-    pch = point_types[as.character(horizons)],
-    lwd = 2,
-    bty = "n",
-    cex = 0.85,
-    title = "Horizon"
-  )
-}
-
-dev.off()
-
-# -------------------------------------------------
-# Benefit-cost ratio uncertainty plot by scenario
-# -------------------------------------------------
-
-bcr_plot_dt <- mc_results[, .(
-  p05 = quantile(benefit_cost_ratio, 0.05, na.rm = TRUE),
-  p25 = quantile(benefit_cost_ratio, 0.25, na.rm = TRUE),
-  median = median(benefit_cost_ratio, na.rm = TRUE),
-  p75 = quantile(benefit_cost_ratio, 0.75, na.rm = TRUE),
-  p95 = quantile(benefit_cost_ratio, 0.95, na.rm = TRUE)
-), by = scenario_short]
-
-bcr_plot_dt[, scenario_short := factor(
-  scenario_short,
-  levels = c(
-    "Full relocation",
-    "Move effect",
-    "SFHA exit effect"
-  )
-)]
-
-bcr_plot_dt <- bcr_plot_dt[order(scenario_short)]
-
-scenario_cols <- c(
-  "Full relocation" = "#0072B2",
-  "Move effect" = "forestgreen",
-  "SFHA exit effect" = "goldenrod2"
-)
-
-pdf(
-  file = file.path(fig_dir, "bca_ratio_uncertainty_plot.pdf"),
-  width = 7,
-  height = 4.5,
-  useDingbats = FALSE
-)
-
-par(mar = c(5, 7, 2, 1), las = 1, bty = "n")
-
-plot(
-  NA,
-  xlim = range(c(bcr_plot_dt$p05, bcr_plot_dt$p95, 1), na.rm = TRUE),
-  ylim = c(0.5, nrow(bcr_plot_dt) + 0.5),
-  yaxt = "n",
-  ylab = "",
-  xlab = "Benefit-cost ratio",
-  main = "",
-  cex.lab = 1.2,
-  cex.axis = 1.1
-)
-
-abline(v = 1, lty = 2, lwd = 1.5)
-
-axis(
-  side = 2,
-  at = seq_len(nrow(bcr_plot_dt)),
-  labels = rev(as.character(bcr_plot_dt$scenario_short)),
-  tick = FALSE,
-  cex.axis = 1.1
-)
-
-plot_dt <- copy(bcr_plot_dt)
-plot_dt[, y := rev(seq_len(.N))]
-
-for (i in seq_len(nrow(plot_dt))) {
-  row <- plot_dt[i]
-  col_i <- scenario_cols[as.character(row$scenario_short)]
-  
-  segments(row$p05, row$y, row$p95, row$y, lwd = 2, col = col_i)
-  rect(
-    xleft = row$p25,
-    ybottom = row$y - 0.18,
-    xright = row$p75,
-    ytop = row$y + 0.18,
-    col = adjustcolor(col_i, alpha.f = 0.35),
-    border = col_i,
-    lwd = 2
-  )
-  points(row$median, row$y, pch = 16, cex = 1.3, col = col_i)
-}
-
-mtext(
-  "Monte Carlo uncertainty intervals",
-  side = 3,
-  line = 0.2,
-  adj = 0,
-  cex = 1
-)
-
-dev.off()
-
-# -------------------------------------------------
-# SI Figure: Monte Carlo distributions
-# Panel A: Net benefits per property
-# Panel B: Benefit-cost ratios
-# -------------------------------------------------
-
-net_xlim <- quantile(mc_results$net_benefit, c(0.01, 0.99), na.rm = TRUE)
-
-dens_net <- lapply(names(scenario_cols), function(s) {
-  density(
-    mc_results[
-      scenario_short == s &
-        net_benefit >= net_xlim[1] &
-        net_benefit <= net_xlim[2],
-      net_benefit
-    ],
-    na.rm = TRUE
-  )
-})
-
-names(dens_net) <- names(scenario_cols)
-ymax_net <- max(sapply(dens_net, function(d) max(d$y, na.rm = TRUE)))
-
-bcr_xlim <- quantile(mc_results$benefit_cost_ratio, c(0.01, 0.99), na.rm = TRUE)
-
-dens_bcr <- lapply(names(scenario_cols), function(s) {
-  density(
-    mc_results[
-      scenario_short == s &
-        benefit_cost_ratio >= bcr_xlim[1] &
-        benefit_cost_ratio <= bcr_xlim[2],
-      benefit_cost_ratio
-    ],
-    na.rm = TRUE
-  )
-})
-
-names(dens_bcr) <- names(scenario_cols)
-ymax_bcr <- max(sapply(dens_bcr, function(d) max(d$y, na.rm = TRUE)))
-
-pdf(
-  file = file.path(fig_dir, "si_monte_carlo_distributions.pdf"),
-  width = 8,
-  height = 9,
-  useDingbats = FALSE
-)
-
-par(mfrow = c(2, 1), mar = c(5, 5, 2, 1), las = 1, bty = "n")
-
-# Panel A: Net benefits
-plot(
-  NA,
-  xlim = net_xlim,
-  ylim = c(0, ymax_net * 1.12),
-  xlab = "Net benefit per treated property/household",
-  ylab = "Density",
-  main = "A. Monte Carlo distribution of net benefits",
-  cex.lab = 1.2,
-  cex.main = 1.1,
-  cex.axis = 1,
-  xaxt = "n"
-)
-
-axis(
-  side = 1,
-  at = pretty(net_xlim),
-  labels = format(pretty(net_xlim), big.mark = ",", scientific = FALSE)
-)
-
-abline(v = 0, lty = 2, lwd = 1.5)
-
-for (s in names(scenario_cols)) {
-  d <- dens_net[[s]]
-  polygon(
-    c(d$x, rev(d$x)),
-    c(d$y, rep(0, length(d$y))),
-    col = adjustcolor(scenario_cols[s], alpha.f = 0.20),
-    border = NA
-  )
-  lines(d$x, d$y, col = scenario_cols[s], lwd = 2.5)
-}
-
-legend(
-  "topright",
-  legend = names(scenario_cols),
-  col = scenario_cols,
-  lwd = 2.5,
-  bty = "n",
-  cex = 0.95
-)
-
-# Panel B: Benefit-cost ratios
-plot(
-  NA,
-  xlim = bcr_xlim,
-  ylim = c(0, ymax_bcr * 1.12),
-  xlab = "Benefit-cost ratio",
-  ylab = "Density",
-  main = "B. Monte Carlo distribution of benefit-cost ratios",
-  cex.lab = 1.2,
-  cex.main = 1.1,
-  cex.axis = 1,
-  xaxt = "n"
-)
-
-axis(
-  side = 1,
-  at = pretty(bcr_xlim),
-  labels = format(pretty(bcr_xlim), scientific = FALSE, trim = TRUE)
-)
-
-abline(v = 1, lty = 2, lwd = 1.5)
-
-for (s in names(scenario_cols)) {
-  d <- dens_bcr[[s]]
-  polygon(
-    c(d$x, rev(d$x)),
-    c(d$y, rep(0, length(d$y))),
-    col = adjustcolor(scenario_cols[s], alpha.f = 0.20),
-    border = NA
-  )
-  lines(d$x, d$y, col = scenario_cols[s], lwd = 2.5)
-}
-
-legend(
-  "topright",
-  legend = names(scenario_cols),
-  col = scenario_cols,
-  lwd = 2.5,
-  bty = "n",
-  cex = 0.95
-)
-
-dev.off()
+cat("\nDONE full recurrence-based BCA (with IA, amenity, deadweight cost).\n")
