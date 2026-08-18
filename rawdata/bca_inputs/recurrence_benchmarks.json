@@ -1,0 +1,7 @@
+{
+  "lower_recurrence_nfip_zone_weighted_EXACT": 0.0152653565,
+  "lower_recurrence_broad_av_pooled_for_reference": 0.0159,
+  "upper_recurrence_county_disaster_declaration": 0.23280034763792445,
+  "repetitive_loss_benchmark": 0.2,
+  "conditional_bc_loss": 45917
+}

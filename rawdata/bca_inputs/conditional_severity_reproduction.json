@@ -1,0 +1,17 @@
+{
+  "sample_definition": "buyout-ZIP-matched (3072 ZIPs from femabuyouts.csv), ratedFloodZone starts with A or V, paid claim = amountPaidOnBuildingClaim>0 OR amountPaidOnContentsClaim>0, negative values retained (not dropped)",
+  "N": 494010,
+  "mean_combined_building_plus_contents": 45916.751226392174,
+  "median_combined": 17003.795,
+  "sd_combined": 82351.22861533413,
+  "p25": 4910.9925,
+  "p75": 55628.9825,
+  "p90": 123578.48900000006,
+  "p95": 182380.9575,
+  "p99": 345942.7087999996,
+  "mean_building_component_incl_zero": 37737.66189437466,
+  "mean_contents_component_incl_zero": 8179.0893320175865,
+  "n_negative": 29,
+  "min_total": -199667.5,
+  "max_total": 10000000.0
+}

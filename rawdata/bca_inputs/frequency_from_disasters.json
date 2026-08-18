@@ -1,0 +1,8 @@
+{
+  "n_years": 55,
+  "all_counties_universe": 3324,
+  "national_annual_prob": 0.16401378404988515,
+  "buyout_weighted_annual_prob": 0.23280034763792445,
+  "buyout_distinct_county_annual_prob": 0.1997148607849715,
+  "ratio_buyout_to_national": 1.4193950160135183
+}
