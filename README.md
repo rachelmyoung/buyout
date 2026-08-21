@@ -125,7 +125,6 @@ Three JSON files supplying the benefit–cost analysis's flood-hazard-side param
 ### Additional Included Data
 
 - `rawdata/femabuyouts.csv`: FEMA buyout addresses (raw; shapefiles are the geocoded version)
-- `rawdata/uniqueAddress_20002017_GeoCoded_joinCensusTract2000_ACS2000_NFHLall.csv`: geocoded addresses merged with NFHL data (including Infutor addresses without IDs and FEMA buyout addresses)
 
 ## Confidential Data (Not Included)
 
